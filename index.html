@@ -1,0 +1,781 @@
+"""Ciudad en Alerta: version tactil con Kivy para Android y escritorio.
+
+Ejecucion en un entorno con Kivy:
+    python main.py
+
+Para incluirlo en un paquete Android, coloca este archivo como main.py en el
+proyecto Kivy y declara "kivy" en los requisitos de la herramienta de empaquetado.
+"""
+
+import json
+import math
+import random
+import time
+from pathlib import Path
+
+from kivy.app import App
+from kivy.clock import Clock
+from kivy.core.window import Window
+from kivy.metrics import dp, sp
+from kivy.utils import get_color_from_hex
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.label import Label
+from kivy.uix.widget import Widget
+from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle
+
+
+COLORS = {
+    "background": "#0F1120",
+    "card": "#15192B",
+    "board": "#111A2D",
+    "foreground": "#E9F0F4",
+    "muted": "#8E96AA",
+    "cyan": "#52E8ED",
+    "yellow": "#F6D65B",
+    "pink": "#FF4F86",
+    "border": "#303750",
+    "building": "#172237",
+    "glow": "#182A46",
+    "target_inner": "#261B37",
+}
+
+INITIAL_LIVES = 3
+TARGET_RADIUS = dp(25)
+
+
+def color(name, alpha=1):
+    """Return a Kivy RGBA color from the app palette."""
+    rgba = get_color_from_hex(COLORS[name])
+    return tuple(rgba[:3]) + (alpha,)
+
+
+class StatCard(BoxLayout):
+    def __init__(self, title, value="0", value_color="foreground", **kwargs):
+        super().__init__(
+            orientation="vertical",
+            padding=(dp(8), dp(6)),
+            spacing=dp(1),
+            **kwargs,
+        )
+        self.value_color = value_color
+        with self.canvas.before:
+            Color(*color("card"))
+            self._background = RoundedRectangle(
+                pos=self.pos, size=self.size, radius=[dp(3)]
+            )
+            Color(*color("border"))
+            self._border = Line(
+                rounded_rectangle=(
+                    self.x, self.y, self.width, self.height, dp(3)
+                ),
+                width=dp(0.8),
+            )
+        self.bind(pos=self._update_background, size=self._update_background)
+
+        self.title_label = Label(
+            text=title,
+            color=color("muted"),
+            font_size=sp(8),
+            bold=True,
+            halign="left",
+            valign="middle",
+            size_hint_y=0.48,
+            shorten=True,
+            shorten_from="right",
+        )
+        self.title_label.bind(size=self._fit_text)
+        self.value_label = Label(
+            text=value,
+            color=color(value_color),
+            font_size=sp(15),
+            bold=True,
+            halign="left",
+            valign="middle",
+            size_hint_y=0.52,
+            shorten=True,
+            shorten_from="right",
+        )
+        self.value_label.bind(size=self._fit_text)
+        self.add_widget(self.title_label)
+        self.add_widget(self.value_label)
+
+    @staticmethod
+    def _fit_text(label, _size):
+        label.text_size = label.size
+
+    def _update_background(self, *_args):
+        self._background.pos = self.pos
+        self._background.size = self.size
+        self._border.rounded_rectangle = (
+            self.x, self.y, self.width, self.height, dp(3)
+        )
+
+    def set_value(self, value, value_color=None):
+        self.value_label.text = str(value)
+        self.value_label.color = color(value_color or self.value_color)
+
+
+class HintCard(BoxLayout):
+    def __init__(self, icon, text, **kwargs):
+        super().__init__(
+            orientation="vertical",
+            padding=(dp(3), dp(4)),
+            spacing=dp(3),
+            **kwargs,
+        )
+        with self.canvas.before:
+            Color(*color("border", 0.75))
+            self._background = RoundedRectangle(
+                pos=self.pos, size=self.size, radius=[dp(3)]
+            )
+        self.bind(pos=self._update_background, size=self._update_background)
+        self.add_widget(
+            Label(
+                text=icon,
+                color=color("yellow"),
+                font_size=sp(15),
+                bold=True,
+                size_hint_y=0.47,
+            )
+        )
+        detail = Label(
+            text=text,
+            color=color("muted"),
+            font_size=sp(8),
+            halign="center",
+            valign="middle",
+            size_hint_y=0.53,
+        )
+        detail.bind(size=lambda label, size: setattr(label, "text_size", size))
+        self.add_widget(detail)
+
+    def _update_background(self, *_args):
+        self._background.pos = self.pos
+        self._background.size = self.size
+
+
+class GameBoard(FloatLayout):
+    """Draws the play area and moving targets; accepts direct touch input."""
+
+    def __init__(self, game, **kwargs):
+        super().__init__(**kwargs)
+        self.game = game
+        self.thieves = []
+        self.overlay_panel = None
+        self.bind(size=self._layout_overlay, pos=self._layout_overlay)
+        Clock.schedule_interval(self.draw_board, 1 / 30)
+
+    def bounds(self):
+        margin = dp(12)
+        return (
+            margin,
+            margin,
+            max(margin + dp(1), self.width - margin),
+            max(margin + dp(1), self.height - margin),
+        )
+
+    def spawn_thief(self):
+        left, bottom, right, top = self.bounds()
+        radius = TARGET_RADIUS
+        low_x = left + radius + dp(3)
+        high_x = max(low_x, right - radius - dp(3))
+        low_y = bottom + radius + dp(3)
+        high_y = max(low_y, top - radius - dp(3))
+        speed = random.uniform(dp(58), dp(90)) + (self.game.round - 1) * dp(10)
+        angle = random.uniform(0, math.tau)
+        return {
+            "x": random.uniform(low_x, high_x),
+            "y": random.uniform(low_y, high_y),
+            "vx": math.cos(angle) * speed,
+            "vy": math.sin(angle) * speed,
+            "radius": radius,
+        }
+
+    def set_overlay(self, phase):
+        if self.overlay_panel is not None:
+            self.remove_widget(self.overlay_panel)
+            self.overlay_panel = None
+
+        if phase == "playing":
+            return
+
+        if phase == "ready":
+            title = "CIUDAD EN ALERTA"
+            subtitle = "Detén a los sospechosos antes de que escapen."
+            button_text = "INICIAR PATRULLA"
+            show_hints = True
+            callback = self.game.start_game
+        elif phase == "paused":
+            title = "PAUSA OPERATIVA"
+            subtitle = "La ciudad espera. Reanuda cuando estés listo."
+            button_text = "REANUDAR"
+            show_hints = False
+            callback = self.game.resume_game
+        else:
+            title = "TURNO TERMINADO"
+            subtitle = f"El perímetro fue comprometido.\nPUNTUACIÓN {self.game.score:04d}"
+            button_text = "JUGAR DE NUEVO"
+            show_hints = False
+            callback = self.game.start_game
+
+        panel = BoxLayout(
+            orientation="vertical",
+            size_hint=(0.94, None),
+            height=dp(286 if show_hints else 224),
+            padding=(dp(14), dp(12)),
+            spacing=dp(5),
+            pos_hint={"center_x": 0.5, "center_y": 0.5},
+        )
+        with panel.canvas.before:
+            Color(*color("background", 0.97))
+            panel._panel_background = RoundedRectangle(
+                pos=panel.pos, size=panel.size, radius=[dp(4)]
+            )
+            Color(*color("border"))
+            panel._panel_border = Line(
+                rounded_rectangle=(
+                    panel.x, panel.y, panel.width, panel.height, dp(4)
+                ),
+                width=dp(0.8),
+            )
+        panel.bind(pos=self._update_panel_background, size=self._update_panel_background)
+
+        panel.add_widget(
+            Label(
+                text="PROTOCOLO DE INTERVENCIÓN",
+                color=color("cyan"),
+                bold=True,
+                font_size=sp(8),
+                size_hint_y=None,
+                height=dp(18),
+            )
+        )
+        panel.add_widget(
+            Label(
+                text=title,
+                color=color("foreground"),
+                bold=True,
+                font_size=sp(22),
+                halign="center",
+                valign="middle",
+                text_size=(self.width * 0.85, None),
+                size_hint_y=None,
+                height=dp(54),
+            )
+        )
+        panel.add_widget(
+            Label(
+                text=subtitle,
+                color=color("muted"),
+                font_size=sp(11),
+                halign="center",
+                valign="middle",
+                text_size=(self.width * 0.84, None),
+                size_hint_y=None,
+                height=dp(40),
+            )
+        )
+
+        if show_hints:
+            hints = BoxLayout(
+                orientation="horizontal",
+                spacing=dp(6),
+                size_hint_y=None,
+                height=dp(68),
+            )
+            hints.add_widget(HintCard("⊙", "Toca a los\nsospechosos"))
+            hints.add_widget(HintCard("ϟ", "Cada ronda\nacelera"))
+            hints.add_widget(HintCard("♡", "Tres\n oportunidades"))
+            panel.add_widget(hints)
+
+        action = Button(
+            text=button_text,
+            size_hint_y=None,
+            height=dp(46),
+            background_normal="",
+            background_down="",
+            background_color=color("cyan"),
+            color=color("background"),
+            bold=True,
+            font_size=sp(11),
+        )
+        action.bind(on_release=lambda *_args: callback())
+        panel.add_widget(action)
+        self.overlay_panel = panel
+        self.add_widget(panel)
+        self._layout_overlay()
+
+    @staticmethod
+    def _update_panel_background(panel, *_args):
+        background = getattr(panel, "_panel_background", None)
+        border = getattr(panel, "_panel_border", None)
+        if background is not None:
+            background.pos = panel.pos
+            background.size = panel.size
+        if border is not None:
+            border.rounded_rectangle = (
+                panel.x, panel.y, panel.width, panel.height, dp(4)
+            )
+
+    def _layout_overlay(self, *_args):
+        if self.overlay_panel is None:
+            return
+        panel = self.overlay_panel
+        panel.width = self.width * 0.94
+        panel.height = min(
+            dp(286 if self.game.phase == "ready" else 224),
+            max(dp(190), self.height - dp(20)),
+        )
+        panel.center = self.center
+        panel.pos_hint = {}
+
+        # Keep overlay text within the actual board width on narrow phones.
+        for child in panel.children:
+            if isinstance(child, Label):
+                child.text_size = (max(dp(130), panel.width - dp(30)), None)
+
+    def on_touch_down(self, touch):
+        if super().on_touch_down(touch):
+            return True
+        if self.game.phase != "playing" or not self.collide_point(*touch.pos):
+            return False
+
+        local_x = touch.x - self.x
+        local_y = touch.y - self.y
+        for index in range(len(self.thieves) - 1, -1, -1):
+            thief = self.thieves[index]
+            if math.hypot(local_x - thief["x"], local_y - thief["y"]) <= thief["radius"] + dp(10):
+                del self.thieves[index]
+                self.game.hit_thief()
+                return True
+        return True
+
+    def draw_board(self, _delta):
+        self.canvas.clear()
+        left, bottom, right, top = self.bounds()
+        x0, y0 = self.x, self.y
+        board_width = max(0, right - left)
+        board_height = max(0, top - bottom)
+
+        with self.canvas:
+            Color(*color("board"))
+            Rectangle(
+                pos=(x0 + left, y0 + bottom),
+                size=(board_width, board_height),
+            )
+            Color(*color("glow", 0.75))
+            Ellipse(
+                pos=(x0 + right - dp(210), y0 + top - dp(155)),
+                size=(dp(220), dp(220)),
+            )
+
+            # Silhouette of the city.
+            building_base = y0 + bottom + board_height * 0.12
+            buildings = (
+                (left + board_width * 0.04, board_width * 0.23, 0.28),
+                (left + board_width * 0.34, board_width * 0.29, 0.43),
+                (right - board_width * 0.25, board_width * 0.23, 0.23),
+            )
+            for bx, bw, height_ratio in buildings:
+                bh = board_height * height_ratio
+                Color(*color("building"))
+                Rectangle(
+                    pos=(x0 + bx, building_base),
+                    size=(bw, bh),
+                )
+                Color(*color("border", 0.8))
+                Line(
+                    rectangle=(x0 + bx, building_base, bw, bh),
+                    width=dp(0.7),
+                )
+                Color(*color("border", 0.75))
+                for window_row in range(2, max(3, int(bh / dp(20)))):
+                    for window_col in range(1, max(2, int(bw / dp(18)))):
+                        wx = x0 + bx + dp(7) + (window_col - 1) * dp(17)
+                        wy = building_base + dp(7) + (window_row - 1) * dp(18)
+                        if wx + dp(4) < x0 + bx + bw and wy + dp(7) < building_base + bh:
+                            Rectangle(pos=(wx, wy), size=(dp(4), dp(7)))
+
+            Color(*color("yellow", 0.65))
+            street_y = y0 + bottom + board_height * 0.16
+            dash_start = x0 + left
+            dash_end = x0 + right
+            dash_width = dp(13)
+            dash_gap = dp(11)
+            current_x = dash_start
+            while current_x < dash_end:
+                Line(
+                    points=(current_x, street_y, min(current_x + dash_width, dash_end), street_y),
+                    width=dp(1.4),
+                )
+                current_x += dash_width + dash_gap
+
+            # Each suspect is a large, easy-to-hit touch target.
+            for thief in self.thieves:
+                cx = x0 + thief["x"]
+                cy = y0 + thief["y"]
+                radius = thief["radius"]
+                Color(*color("pink"))
+                Ellipse(pos=(cx - radius, cy - radius), size=(radius * 2, radius * 2))
+                Color(*color("foreground"))
+                Line(circle=(cx, cy, radius), width=dp(1.6))
+                Color(*color("target_inner"))
+                Ellipse(
+                    pos=(cx - dp(7), cy + dp(1)),
+                    size=(dp(14), dp(14)),
+                )
+                Color(*color("target_inner"))
+                Line(
+                    points=(
+                        cx - dp(12), cy - dp(9),
+                        cx, cy - dp(3),
+                        cx + dp(12), cy - dp(9),
+                    ),
+                    width=dp(3.5),
+                )
+                Color(*color("yellow"))
+                Ellipse(
+                    pos=(cx + dp(10), cy + dp(10)),
+                    size=(dp(6), dp(6)),
+                )
+
+
+class CiudadEnAlertaGame(BoxLayout):
+    def __init__(self, data_dir, **kwargs):
+        super().__init__(
+            orientation="vertical",
+            padding=(dp(14), dp(10), dp(14), dp(9)),
+            spacing=dp(8),
+            **kwargs,
+        )
+        self.data_dir = Path(data_dir)
+        self.phase = "ready"
+        self.score = 0
+        self.lives = INITIAL_LIVES
+        self.round = 1
+        self.best_score = self.load_best_score()
+        self.next_spawn = 0.0
+        self.last_frame = time.monotonic()
+        self._keyboard_bound = False
+
+        with self.canvas.before:
+            Color(*color("background"))
+            self._background = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._update_background, size=self._update_background)
+
+        self._build_header()
+        self._build_stats()
+        self._build_board()
+        self._build_footer()
+        self.refresh_stats()
+        self.board.set_overlay("ready")
+        Clock.schedule_interval(self.update_game, 1 / 60)
+        Window.bind(on_keyboard=self.on_keyboard)
+        self._keyboard_bound = True
+
+    def _update_background(self, *_args):
+        self._background.pos = self.pos
+        self._background.size = self.size
+
+    def _build_header(self):
+        header = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(48),
+            spacing=dp(8),
+        )
+        lockup = BoxLayout(orientation="horizontal", spacing=dp(8))
+        shield = Label(
+            text="✓",
+            color=color("cyan"),
+            font_size=sp(20),
+            bold=True,
+            size_hint_x=None,
+            width=dp(38),
+        )
+        lockup.add_widget(shield)
+
+        brand_text = BoxLayout(orientation="vertical", spacing=0)
+        brand_text.add_widget(
+            Label(
+                text="UNIDAD NOCTURNA",
+                color=color("muted"),
+                font_size=sp(8),
+                bold=True,
+                halign="left",
+                valign="bottom",
+                size_hint_y=0.42,
+                text_size=(None, None),
+            )
+        )
+        brand_text.add_widget(
+            Label(
+                text="CIUDAD EN ALERTA",
+                color=color("foreground"),
+                font_size=sp(12),
+                bold=True,
+                halign="left",
+                valign="top",
+                size_hint_y=0.58,
+            )
+        )
+        lockup.add_widget(brand_text)
+        header.add_widget(lockup)
+
+        self.signal_label = Label(
+            text="● SEÑAL ESTABLE",
+            color=color("cyan"),
+            font_size=sp(8),
+            bold=True,
+            size_hint_x=None,
+            width=dp(104),
+        )
+        header.add_widget(self.signal_label)
+        self.pause_button = Button(
+            text="Ⅱ",
+            size_hint=(None, None),
+            size=(dp(40), dp(40)),
+            background_normal="",
+            background_down="",
+            background_color=color("card"),
+            color=color("foreground"),
+            font_size=sp(16),
+            bold=True,
+            opacity=0,
+            disabled=True,
+        )
+        self.pause_button.bind(on_release=lambda *_args: self.pause_game())
+        header.add_widget(self.pause_button)
+        self.add_widget(header)
+
+    def _build_stats(self):
+        self.stats = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(56),
+            spacing=dp(6),
+        )
+        self.score_card = StatCard("PUNTOS")
+        self.round_card = StatCard("RONDA", "01")
+        self.lives_card = StatCard("UNIDADES", "●●●", "pink")
+        self.best_card = StatCard("RÉCORD", str(self.best_score))
+        for card in (
+            self.score_card,
+            self.round_card,
+            self.lives_card,
+            self.best_card,
+        ):
+            self.stats.add_widget(card)
+        self.add_widget(self.stats)
+
+    def _build_board(self):
+        shell = BoxLayout(
+            orientation="vertical",
+            padding=dp(8),
+            spacing=dp(4),
+        )
+        with shell.canvas.before:
+            Color(*color("card"))
+            shell._background = RoundedRectangle(
+                pos=shell.pos, size=shell.size, radius=[dp(3)]
+            )
+            Color(*color("border"))
+            shell._border = Line(
+                rounded_rectangle=(shell.x, shell.y, shell.width, shell.height, dp(3)),
+                width=dp(0.8),
+            )
+        shell.bind(pos=self._update_shell, size=self._update_shell)
+
+        board_header = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(24),
+            padding=(dp(4), 0),
+        )
+        board_header.add_widget(
+            Label(
+                text="PERÍMETRO ACTIVO",
+                color=color("cyan"),
+                font_size=sp(8),
+                bold=True,
+                halign="left",
+            )
+        )
+        self.level_label = Label(
+            text="NIVEL 01",
+            color=color("muted"),
+            font_size=sp(8),
+            bold=True,
+            halign="right",
+        )
+        board_header.add_widget(self.level_label)
+        shell.add_widget(board_header)
+
+        self.board = GameBoard(self)
+        shell.add_widget(self.board)
+        self.add_widget(shell)
+
+    @staticmethod
+    def _update_shell(shell, *_args):
+        shell._background.pos = shell.pos
+        shell._background.size = shell.size
+        shell._border.rounded_rectangle = (
+            shell.x, shell.y, shell.width, shell.height, dp(3)
+        )
+
+    def _build_footer(self):
+        footer = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(36),
+            spacing=dp(6),
+        )
+        footer.add_widget(
+            Label(
+                text="☝",
+                color=color("yellow"),
+                font_size=sp(16),
+                size_hint_x=None,
+                width=dp(23),
+            )
+        )
+        footer.add_widget(
+            Label(
+                text="Toca rápido. No dejes que salgan del perímetro.",
+                color=color("muted"),
+                font_size=sp(9),
+                halign="left",
+                shorten=True,
+                shorten_from="right",
+            )
+        )
+        self.add_widget(footer)
+
+    def load_best_score(self):
+        try:
+            data = json.loads((self.data_dir / "best_score.json").read_text(encoding="utf-8"))
+            return max(0, int(data.get("best_score", 0)))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return 0
+
+    def save_best_score(self):
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            (self.data_dir / "best_score.json").write_text(
+                json.dumps({"best_score": self.best_score}),
+                encoding="utf-8",
+            )
+        except OSError:
+            # Un error de almacenamiento no debe interrumpir la partida.
+            pass
+
+    def refresh_stats(self):
+        self.score_card.set_value(self.score)
+        self.round_card.set_value(f"{self.round:02d}")
+        self.lives_card.set_value("●" * self.lives, "pink")
+        self.best_card.set_value(self.best_score)
+        self.level_label.text = f"NIVEL {self.round:02d}"
+
+    def set_phase(self, phase):
+        self.phase = phase
+        self.pause_button.opacity = 1 if phase == "playing" else 0
+        self.pause_button.disabled = phase != "playing"
+        self.board.set_overlay(phase)
+
+    def start_game(self):
+        self.score = 0
+        self.round = 1
+        self.lives = INITIAL_LIVES
+        self.board.thieves = [self.board.spawn_thief()]
+        self.next_spawn = time.monotonic() + 1.0
+        self.last_frame = time.monotonic()
+        self.refresh_stats()
+        self.set_phase("playing")
+
+    def pause_game(self):
+        if self.phase == "playing":
+            self.set_phase("paused")
+
+    def resume_game(self):
+        if self.phase == "paused":
+            self.last_frame = time.monotonic()
+            self.set_phase("playing")
+
+    def hit_thief(self):
+        self.score += 10
+        self.round = self.score // 100 + 1
+        self.refresh_stats()
+
+    def finish_game(self):
+        self.set_phase("gameover")
+        if self.score > self.best_score:
+            self.best_score = self.score
+            self.save_best_score()
+            self.refresh_stats()
+
+    def update_game(self, _delta):
+        now = time.monotonic()
+        delta = min(now - self.last_frame, 0.04)
+        self.last_frame = now
+        if self.phase != "playing" or self.board.width <= 0 or self.board.height <= 0:
+            return
+
+        left, bottom, right, top = self.board.bounds()
+        escaped = 0
+        remaining = []
+        for thief in self.board.thieves:
+            thief["x"] += thief["vx"] * delta
+            thief["y"] += thief["vy"] * delta
+            radius = thief["radius"]
+            if (
+                thief["x"] + radius < left
+                or thief["x"] - radius > right
+                or thief["y"] + radius < bottom
+                or thief["y"] - radius > top
+            ):
+                escaped += 1
+            else:
+                remaining.append(thief)
+        self.board.thieves = remaining
+
+        if escaped:
+            self.lives = max(0, self.lives - escaped)
+            self.refresh_stats()
+            if self.lives == 0:
+                self.finish_game()
+                return
+
+        spawn_interval = max(0.48, 1.45 - (self.round - 1) * 0.09)
+        if now >= self.next_spawn:
+            self.board.thieves.append(self.board.spawn_thief())
+            self.next_spawn = now + spawn_interval
+
+    def on_keyboard(self, _window, key, *_args):
+        # Pause with Space/Escape; Android Back also pauses rather than closing.
+        if key in (27, 32, 1001):
+            if self.phase == "playing":
+                self.pause_game()
+                return True
+            if key == 32 and self.phase == "paused":
+                self.resume_game()
+                return True
+        return False
+
+    def on_parent(self, _widget, parent):
+        if parent is None and self._keyboard_bound:
+            Window.unbind(on_keyboard=self.on_keyboard)
+            self._keyboard_bound = False
+
+
+class CiudadEnAlertaApp(App):
+    title = "Ciudad en Alerta"
+
+    def build(self):
+        Window.clearcolor = color("background")
+        return CiudadEnAlertaGame(self.user_data_dir)
+
+
+if __name__ == "__main__":
+    CiudadEnAlertaApp().run()
